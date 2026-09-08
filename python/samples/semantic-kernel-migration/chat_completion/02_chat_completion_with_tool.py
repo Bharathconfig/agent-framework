@@ -1,0 +1,100 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "agent-framework-openai",
+#     "python-dotenv",
+#     "semantic-kernel",
+# ]
+# ///
+# Run with any PEP 723 compatible runner, e.g.:
+#   uv run samples/semantic-kernel-migration/chat_completion/02_chat_completion_with_tool.py
+
+# Copyright (c) Microsoft. All rights reserved.
+"""Demonstrate SK plugins vs Agent Framework tools with a chat agent.
+
+Configure your OpenAI or Azure OpenAI credentials before running. The example
+exposes a "specials" tool that both SDKs call during the conversation.
+"""
+
+import asyncio
+
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+
+async def run_semantic_kernel() -> None:
+    """Implements run semantic kernel.
+    
+    Returns:
+        Description of the return value.
+    """
+    from semantic_kernel.agents import ChatCompletionAgent
+    from semantic_kernel.connectors.ai.open_ai import OpenAIChatCompletion
+    from semantic_kernel.functions import kernel_function
+
+    class SpecialsPlugin:
+        """Represents the SpecialsPlugin type and related behavior.
+        """
+        @kernel_function(name="specials", description="List daily specials")
+        def specials(self) -> str:
+            """Implements specials.
+            
+            Args:
+                self: Description of self.
+            
+            Returns:
+                Description of the return value.
+            """
+            return "Clam chowder, Cobb salad, Chai tea"
+
+    # SK advertises tools by attaching plugin instances at construction time.
+    agent = ChatCompletionAgent(
+        service=OpenAIChatCompletion(),
+        name="Host",
+        instructions="Answer menu questions accurately.",
+        plugins=[SpecialsPlugin()],
+    )
+    response = await agent.get_response("What soup can I order today?")
+    print("[SK]", response.message.content)
+
+
+async def run_agent_framework() -> None:
+    """Implements run agent framework.
+    
+    Returns:
+        Description of the return value.
+    """
+    from agent_framework import Agent, tool
+    from agent_framework.openai import OpenAIChatClient
+
+    @tool(name="specials", description="List daily specials")
+    async def specials() -> str:
+        """Implements specials.
+        
+        Returns:
+            Description of the return value.
+        """
+        return "Clam chowder, Cobb salad, Chai tea"
+
+    # AF tools are provided as callables on each agent instance.
+    chat_agent = Agent(
+        client=OpenAIChatClient(),
+        name="Host",
+        instructions="Answer menu questions accurately.",
+        tools=[specials],
+    )
+    reply = await chat_agent.run("What soup can I order today?")
+    print("[AF]", reply.text)
+
+
+async def main() -> None:
+    """Implements main.
+    """
+    await run_semantic_kernel()
+    await run_agent_framework()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

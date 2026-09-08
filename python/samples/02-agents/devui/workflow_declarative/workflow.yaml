@@ -1,0 +1,60 @@
+name: conditional-workflow
+description: Demonstrates conditional branching based on age entered in DevUI chat
+
+actions:
+  - kind: ParseValue
+    id: get_age
+    displayName: Get user age
+    variable: Local.age
+    value: =System.LastMessage.Text
+    valueType: number
+
+  - kind: If
+    id: check_age
+    displayName: Check age category
+    condition: =Local.age < 13
+    then:
+      - kind: SetValue
+        path: Local.category
+        value: child
+      - kind: SendActivity
+        activity:
+          text: "Welcome, young one! Here are some fun activities for kids."
+    else:
+      - kind: If
+        condition: =Local.age < 20
+        then:
+          - kind: SetValue
+            path: Local.category
+            value: teenager
+          - kind: SendActivity
+            activity:
+              text: "Hey there! Check out these cool things for teens."
+        else:
+          - kind: If
+            condition: =Local.age < 65
+            then:
+              - kind: SetValue
+                path: Local.category
+                value: adult
+              - kind: SendActivity
+                activity:
+                  text: "Welcome! Here are our professional services."
+            else:
+              - kind: SetValue
+                path: Local.category
+                value: senior
+              - kind: SendActivity
+                activity:
+                  text: "Welcome! Enjoy our senior member benefits."
+
+  - kind: SendActivity
+    id: summary
+    displayName: Send category summary
+    activity:
+      text: '=Concat("You have been categorized as: ", Local.category)'
+
+  - kind: SetValue
+    id: set_output
+    path: Workflow.Outputs.category
+    value: =Local.category

@@ -1,0 +1,1326 @@
+"""This module defines functionality for packages/core/tests/workflow/test_sub_workflow.
+
+This file is part of the Microsoft Agent Framework Python codebase.
+"""
+
+# Copyright (c) Microsoft. All rights reserved.
+
+import asyncio
+import logging
+from dataclasses import dataclass, field
+from typing import Any
+from uuid import uuid4
+
+import pytest
+from typing_extensions import Never
+
+from agent_framework import (
+    Executor,
+    SubWorkflowRequestMessage,
+    SubWorkflowResponseMessage,
+    Workflow,
+    WorkflowBuilder,
+    WorkflowCheckpoint,
+    WorkflowContext,
+    WorkflowEvent,
+    WorkflowExecutor,
+    WorkflowRunResult,
+    WorkflowRunState,
+    handler,
+    response_handler,
+)
+from agent_framework._workflows._checkpoint import InMemoryCheckpointStorage
+from agent_framework._workflows._runner_context import InProcRunnerContext, WorkflowMessage
+from agent_framework._workflows._state import State
+
+
+# Test message types
+@dataclass
+class EmailValidationRequest:
+    """Request to validate an email address."""
+
+    email: str
+
+
+@dataclass
+class DomainCheckRequest:
+    """Request to check if a domain is approved."""
+
+    id: str = field(default_factory=lambda: str(uuid4()))
+    domain: str = ""
+    email: str = ""  # Include original email for correlation
+
+
+@dataclass
+class ValidationResult:
+    """Result of email validation."""
+
+    email: str
+    is_valid: bool
+    reason: str
+
+
+class Coordinator(Executor):
+    """Coordinator executor in the parent workflow for simple sub-workflow tests."""
+
+    def __init__(self, cache: dict[str, bool] | None = None) -> None:
+        """Initializes a new instance.
+        
+        Args:
+            self: Description of self.
+            cache: Description of cache.
+        """
+        super().__init__(id="basic_parent")
+        self.result: ValidationResult | None = None
+        self.cache: dict[str, bool] = dict(cache) if cache is not None else {}
+        self._pending_sub_workflow_requests: dict[str, SubWorkflowRequestMessage] = {}
+
+    @handler
+    async def start(self, email: str, ctx: WorkflowContext[EmailValidationRequest]) -> None:
+        """Implements start.
+        
+        Args:
+            self: Description of self.
+            email: Description of email.
+            ctx: Description of ctx.
+        """
+        request = EmailValidationRequest(email=email)
+        await ctx.send_message(request)
+
+    @handler
+    async def handle_domain_request(
+        self,
+        sub_workflow_request: SubWorkflowRequestMessage,
+        ctx: WorkflowContext[SubWorkflowResponseMessage],
+    ) -> None:
+        """Handle requests from sub-workflows with optional caching."""
+        if not isinstance(sub_workflow_request.source_event.data, DomainCheckRequest):
+            raise ValueError("Unexpected request type")
+
+        domain_request = sub_workflow_request.source_event.data
+
+        if domain_request.domain in self.cache:
+            # Return cached result
+            await ctx.send_message(sub_workflow_request.create_response(self.cache[domain_request.domain]))
+        else:
+            # Not in cache, forward to external
+            self._pending_sub_workflow_requests[domain_request.id] = sub_workflow_request
+            await ctx.request_info(domain_request, bool)
+
+    @response_handler
+    async def handle_domain_response(
+        self,
+        original_request: DomainCheckRequest,
+        is_approved: bool,
+        ctx: WorkflowContext[SubWorkflowResponseMessage],
+    ) -> None:
+        """Handle domain check response with correlation and send the response back to the sub-workflow."""
+        if original_request.id not in self._pending_sub_workflow_requests:
+            raise ValueError("No pending sub-workflow request for the given domain check response")
+
+        sub_workflow_request = self._pending_sub_workflow_requests.pop(original_request.id)
+        await ctx.send_message(sub_workflow_request.create_response(is_approved))
+
+    @handler
+    async def collect(self, result: ValidationResult, ctx: WorkflowContext) -> None:
+        """Implements collect.
+        
+        Args:
+            self: Description of self.
+            result: Description of result.
+            ctx: Description of ctx.
+        """
+        self.result = result
+
+
+class EmailFormatValidator(Executor):
+    """Validates the format of an email address."""
+
+    def __init__(self):
+        """Initializes a new instance.
+        
+        Args:
+            self: Description of self.
+        """
+        super().__init__(id="email_format_validator")
+
+    @handler
+    async def validate(
+        self, request: EmailValidationRequest, ctx: WorkflowContext[DomainCheckRequest, ValidationResult]
+    ) -> None:
+        """Validate email format and extract domain."""
+        email = request.email
+        if "@" not in email:
+            result = ValidationResult(email=email, is_valid=False, reason="Invalid email format")
+            await ctx.yield_output(result)
+            return
+
+        domain = email.split("@")[1]
+        domain_check = DomainCheckRequest(domain=domain, email=email)
+        await ctx.send_message(domain_check)
+
+
+class EmailDomainValidator(Executor):
+    """Validates email addresses in a sub-workflow."""
+
+    def __init__(self):
+        """Initializes a new instance.
+        
+        Args:
+            self: Description of self.
+        """
+        super().__init__(id="email_domain_validator")
+
+    @handler
+    async def validate_request(
+        self, request: DomainCheckRequest, ctx: WorkflowContext[DomainCheckRequest, ValidationResult]
+    ) -> None:
+        """Validate an email address."""
+        domain = request.domain
+
+        if not domain:
+            result = ValidationResult(email=request.email, is_valid=False, reason="Invalid email format")
+            await ctx.yield_output(result)
+            return
+
+        # Request domain check from external source
+        await ctx.request_info(request, bool)
+
+    @response_handler
+    async def handle_domain_response(
+        self,
+        original_request: DomainCheckRequest,
+        is_approved: bool,
+        ctx: WorkflowContext[Never, ValidationResult],  # type: ignore[valid-type]
+    ) -> None:
+        """Handle domain check response with correlation."""
+        # Use the original email from the correlated response
+        result = ValidationResult(
+            email=original_request.email,
+            is_valid=is_approved,
+            reason="Domain approved" if is_approved else "Domain not approved",
+        )
+        await ctx.yield_output(result)
+
+
+# Test helper functions
+def create_email_validation_workflow() -> Workflow:
+    """Create a standard email validation workflow."""
+    email_format_validator = EmailFormatValidator()
+    email_domain_validator = EmailDomainValidator()
+
+    return (
+        WorkflowBuilder(start_executor=email_format_validator)
+        .add_edge(email_format_validator, email_domain_validator)
+        .build()
+    )
+
+
+async def test_basic_sub_workflow() -> None:
+    """Test basic sub-workflow execution without interception."""
+    # Create sub-workflow
+    validation_workflow = create_email_validation_workflow()
+
+    # Create parent workflow without interception
+    parent = Coordinator()
+    workflow_executor = WorkflowExecutor(validation_workflow, "email_validation_workflow")
+
+    main_workflow = (
+        WorkflowBuilder(start_executor=parent)
+        .add_edge(parent, workflow_executor)
+        .add_edge(workflow_executor, parent)
+        .build()
+    )
+
+    # Run workflow with mocked external response
+    result = await main_workflow.run("test@example.com")
+
+    # Get request event and respond
+    request_events = result.get_request_info_events()
+    assert len(request_events) == 1
+    assert isinstance(request_events[0].data, DomainCheckRequest)
+    assert request_events[0].data.domain == "example.com"
+
+    # Send response through the main workflow
+    await main_workflow.run(
+        responses={
+            request_events[0].request_id: True  # Domain is approved
+        }
+    )
+
+    # Check result
+    assert parent.result is not None
+    assert parent.result.email == "test@example.com"
+    assert parent.result.is_valid is True
+
+
+async def test_sub_workflow_with_interception():
+    """Test sub-workflow with parent interception and conditional forwarding."""
+    # Create sub-workflow
+    validation_workflow = create_email_validation_workflow()
+
+    # Create parent workflow with interception cache
+    parent = Coordinator(cache={"example.com": True, "internal.org": True})
+    workflow_executor = WorkflowExecutor(validation_workflow, "email_workflow")
+
+    main_workflow = (
+        WorkflowBuilder(start_executor=parent)
+        .add_edge(parent, workflow_executor)
+        .add_edge(workflow_executor, parent)
+        .build()
+    )
+
+    # Test 1: Email with cached domain (intercepted)
+    result = await main_workflow.run("user@example.com")
+    request_events = result.get_request_info_events()
+    assert len(request_events) == 0  # No external requests, handled from cache
+    assert parent.result is not None
+    assert parent.result.email == "user@example.com"
+    assert parent.result.is_valid is True
+
+    # Test 2: Email with unknown domain (forwarded to external)
+    parent.result = None
+    result = await main_workflow.run("user@unknown.com")
+    request_events = result.get_request_info_events()
+    assert len(request_events) == 1  # Forwarded to external
+    assert isinstance(request_events[0].data, DomainCheckRequest)
+    assert request_events[0].data.domain == "unknown.com"
+
+    # Send external response
+    await main_workflow.run(
+        responses={
+            request_events[0].request_id: False  # Domain not approved
+        }
+    )
+    assert parent.result is not None
+    assert parent.result.email == "user@unknown.com"
+    assert parent.result.is_valid is False
+
+    # Test 3: Another cached domain
+    parent.result = None
+    result = await main_workflow.run("user@internal.org")
+    request_events = result.get_request_info_events()
+    assert len(request_events) == 0  # Handled from cache
+    assert parent.result is not None
+    assert parent.result.is_valid is True
+
+
+async def test_workflow_scoped_interception() -> None:
+    """Test interception scoped to specific sub-workflows."""
+
+    class MultiWorkflowParent(Executor):
+        """Parent handling multiple sub-workflows."""
+
+        def __init__(self) -> None:
+            """Initializes a new instance.
+            
+            Args:
+                self: Description of self.
+            """
+            super().__init__(id="multi_parent")
+            self.results: dict[str, ValidationResult] = {}
+            self._pending_sub_workflow_requests: dict[str, SubWorkflowRequestMessage] = {}
+
+        @handler
+        async def start(self, data: dict[str, str], ctx: WorkflowContext[EmailValidationRequest]) -> None:
+            # Send to different sub-workflows
+            """Implements start.
+            
+            Args:
+                self: Description of self.
+                data: Description of data.
+                ctx: Description of ctx.
+            """
+            await ctx.send_message(EmailValidationRequest(email=data["email1"]), target_id="workflow_a")
+            await ctx.send_message(EmailValidationRequest(email=data["email2"]), target_id="workflow_b")
+
+        @handler
+        async def handle_domain_request(
+            self,
+            sub_workflow_request: SubWorkflowRequestMessage,
+            ctx: WorkflowContext[SubWorkflowResponseMessage],
+        ) -> None:
+            """Handle requests from sub-workflows with optional caching."""
+            if not isinstance(sub_workflow_request.source_event.data, DomainCheckRequest):
+                raise ValueError("Unexpected request type")
+
+            domain_request = sub_workflow_request.source_event.data
+
+            if sub_workflow_request.executor_id == "workflow_a" and domain_request.domain == "strict.com":
+                # Strict rules for workflow A
+                await ctx.send_message(
+                    sub_workflow_request.create_response(True), target_id=sub_workflow_request.executor_id
+                )
+                return
+            if sub_workflow_request.executor_id == "workflow_b" and domain_request.domain.endswith(".com"):
+                # Lenient rules for workflow B
+                await ctx.send_message(
+                    sub_workflow_request.create_response(True), target_id=sub_workflow_request.executor_id
+                )
+                return
+
+            # Unknown source, forward to external
+            self._pending_sub_workflow_requests[domain_request.id] = sub_workflow_request
+            await ctx.request_info(domain_request, bool)
+
+        @response_handler
+        async def handle_domain_response(
+            self,
+            original_request: DomainCheckRequest,
+            is_approved: bool,
+            ctx: WorkflowContext[SubWorkflowResponseMessage],
+        ) -> None:
+            """Handle domain check response with correlation and send the response back to the sub-workflow."""
+            if original_request.id not in self._pending_sub_workflow_requests:
+                raise ValueError("No pending sub-workflow request for the given domain check response")
+
+            sub_workflow_request = self._pending_sub_workflow_requests.pop(original_request.id)
+            await ctx.send_message(
+                sub_workflow_request.create_response(is_approved), target_id=sub_workflow_request.executor_id
+            )
+
+        @handler
+        async def collect(self, result: ValidationResult, ctx: WorkflowContext) -> None:
+            """Implements collect.
+            
+            Args:
+                self: Description of self.
+                result: Description of result.
+                ctx: Description of ctx.
+            """
+            self.results[result.email] = result
+
+    # Create two identical sub-workflows
+    workflow_a = create_email_validation_workflow()
+    workflow_b = create_email_validation_workflow()
+
+    parent = MultiWorkflowParent()
+    executor_a = WorkflowExecutor(workflow_a, "workflow_a")
+    executor_b = WorkflowExecutor(workflow_b, "workflow_b")
+
+    main_workflow = (
+        WorkflowBuilder(start_executor=parent)
+        .add_edge(parent, executor_a)
+        .add_edge(parent, executor_b)
+        .add_edge(executor_a, parent)
+        .add_edge(executor_b, parent)
+        .build()
+    )
+
+    # Run test
+    result = await main_workflow.run({"email1": "user@strict.com", "email2": "user@random.com"})
+
+    # Workflow A should handle strict.com
+    # Workflow B should handle any .com domain
+    request_events = result.get_request_info_events()
+    assert len(request_events) == 0  # Both handled internally
+
+    assert len(parent.results) == 2
+    assert parent.results["user@strict.com"].is_valid is True
+    assert parent.results["user@random.com"].is_valid is True
+
+
+async def test_concurrent_sub_workflow_execution() -> None:
+    """Test that WorkflowExecutor can handle multiple concurrent invocations properly."""
+
+    class ConcurrentProcessor(Executor):
+        """Processor that sends multiple concurrent requests to the same sub-workflow."""
+
+        def __init__(self) -> None:
+            """Initializes a new instance.
+            
+            Args:
+                self: Description of self.
+            """
+            super().__init__(id="concurrent_processor")
+            self.results: list[ValidationResult] = []
+            self._pending_sub_workflow_requests: dict[str, SubWorkflowRequestMessage] = {}
+
+        @handler
+        async def start(self, emails: list[str], ctx: WorkflowContext[EmailValidationRequest]) -> None:
+            """Send multiple concurrent requests to the same sub-workflow."""
+            # Send all requests concurrently to the same workflow executor
+            for email in emails:
+                request = EmailValidationRequest(email=email)
+                await ctx.send_message(request)
+
+        @handler
+        async def handle_domain_request(
+            self,
+            sub_workflow_request: SubWorkflowRequestMessage,
+            ctx: WorkflowContext[SubWorkflowResponseMessage],
+        ) -> None:
+            """Handle requests from sub-workflows with optional caching."""
+            if not isinstance(sub_workflow_request.source_event.data, DomainCheckRequest):
+                raise ValueError("Unexpected request type")
+
+            domain_request = sub_workflow_request.source_event.data
+            self._pending_sub_workflow_requests[domain_request.id] = sub_workflow_request
+            await ctx.request_info(domain_request, bool)
+
+        @response_handler
+        async def handle_domain_response(
+            self,
+            original_request: DomainCheckRequest,
+            is_approved: bool,
+            ctx: WorkflowContext[SubWorkflowResponseMessage],
+        ) -> None:
+            """Handle domain check response with correlation and send the response back to the sub-workflow."""
+            if original_request.id not in self._pending_sub_workflow_requests:
+                raise ValueError("No pending sub-workflow request for the given domain check response")
+
+            sub_workflow_request = self._pending_sub_workflow_requests.pop(original_request.id)
+            await ctx.send_message(sub_workflow_request.create_response(is_approved))
+
+        @handler
+        async def collect_result(self, result: ValidationResult, ctx: WorkflowContext) -> None:
+            """Collect results from concurrent executions."""
+            self.results.append(result)
+
+    # Create sub-workflow for email validation
+    validation_workflow = create_email_validation_workflow()
+
+    # Create parent workflow
+    processor = ConcurrentProcessor()
+    workflow_executor = WorkflowExecutor(validation_workflow, "email_workflow")
+
+    main_workflow = (
+        WorkflowBuilder(start_executor=processor)
+        .add_edge(processor, workflow_executor)
+        .add_edge(workflow_executor, processor)
+        .build()
+    )
+
+    # Test concurrent execution with multiple emails
+    emails = [
+        "user1@domain1.com",
+        "user2@domain2.com",
+        "user3@domain3.com",
+        "user4@domain4.com",
+        "user5@domain5.com",
+    ]
+
+    result = await main_workflow.run(emails)
+
+    # Each email should generate one external request
+    request_events = result.get_request_info_events()
+    assert len(request_events) == len(emails)
+
+    # Verify each request corresponds to the correct domain
+    domains_requested = {event.data.domain for event in request_events}  # type: ignore[union-attr]
+    expected_domains = {f"domain{i}.com" for i in range(1, 6)}
+    assert domains_requested == expected_domains
+
+    # Send responses for all requests (approve all domains)
+    responses = {event.request_id: True for event in request_events}
+    await main_workflow.run(responses=responses)
+
+    # All results should be collected
+    assert len(processor.results) == len(emails)
+
+    # Verify each email was processed correctly
+    result_emails = {result.email for result in processor.results}
+    expected_emails = set(emails)
+    assert result_emails == expected_emails
+
+    # All should be valid since we approved all domains
+    for result_obj in processor.results:
+        assert result_obj.is_valid is True
+        assert result_obj.reason == "Domain approved"
+
+    # Verify that concurrent executions were properly isolated
+    # (This is implicitly tested by the fact that we got correct results for all emails)
+
+
+async def test_sub_workflow_warns_on_overlapping_execution(caplog: pytest.LogCaptureFixture) -> None:
+    """A new input while a prior sub-workflow execution is awaiting responses logs a warning.
+
+    Overlapping executions share one sub-workflow instance and its state, so WorkflowExecutor
+    allows the new execution but warns that it is only safe when the wrapped workflow is stateless.
+    """
+
+    class TwoInputParent(Executor):
+        """Represents the TwoInputParent type and related behavior.
+        """
+        def __init__(self) -> None:
+            """Initializes a new instance.
+            
+            Args:
+                self: Description of self.
+            """
+            super().__init__(id="two_input_parent")
+            self._pending: dict[str, SubWorkflowRequestMessage] = {}
+
+        @handler
+        async def start(self, emails: list[str], ctx: WorkflowContext[EmailValidationRequest]) -> None:
+            """Implements start.
+            
+            Args:
+                self: Description of self.
+                emails: Description of emails.
+                ctx: Description of ctx.
+            """
+            for email in emails:
+                await ctx.send_message(EmailValidationRequest(email=email))
+
+        @handler
+        async def handle_domain_request(
+            self,
+            sub_workflow_request: SubWorkflowRequestMessage,
+            ctx: WorkflowContext[SubWorkflowResponseMessage],
+        ) -> None:
+            """Implements handle domain request.
+            
+            Args:
+                self: Description of self.
+                sub_workflow_request: Description of sub_workflow_request.
+                ctx: Description of ctx.
+            """
+            domain_request = sub_workflow_request.source_event.data
+            assert isinstance(domain_request, DomainCheckRequest)
+            self._pending[domain_request.id] = sub_workflow_request
+            await ctx.request_info(domain_request, bool)
+
+        @handler
+        async def collect(self, result: ValidationResult, ctx: WorkflowContext) -> None: ...
+
+    parent = TwoInputParent()
+    workflow_executor = WorkflowExecutor(create_email_validation_workflow(), "email_workflow")
+    main_workflow = (
+        WorkflowBuilder(start_executor=parent)
+        .add_edge(parent, workflow_executor)
+        .add_edge(workflow_executor, parent)
+        .build()
+    )
+
+    with caplog.at_level(logging.WARNING, logger="agent_framework._workflows._workflow_executor"):
+        result = await main_workflow.run(["a@domain1.com", "b@domain2.com"])
+
+    # Two inputs are delivered to the same WorkflowExecutor in one superstep: the second execution
+    # starts while the sub-workflow still has a pending request, producing exactly one overlap
+    # warning from the WorkflowExecutor. (The substring is unique to the WorkflowExecutor warning so
+    # it is not confused with the core Workflow.run pending-request warning.)
+    assert len(result.get_request_info_events()) == 2
+    overlap_warnings = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING and "new input message while its sub-workflow" in record.getMessage()
+    ]
+    assert len(overlap_warnings) == 1
+
+
+# region Checkpoint-related message types and executors for sub-workflow tests
+
+
+@dataclass
+class CheckpointRequest:
+    """Request in a two-step checkpoint test."""
+
+    prompt: str
+    id: str = field(default_factory=lambda: str(uuid4()))
+
+
+class TwoStepSubWorkflowExecutor(Executor):
+    """Sub-workflow executor that makes two sequential requests."""
+
+    def __init__(self) -> None:
+        """Initializes a new instance.
+        
+        Args:
+            self: Description of self.
+        """
+        super().__init__(id="two_step_executor")
+        self._responses: list[str] = []
+
+    @handler
+    async def handle_start(self, msg: str, ctx: WorkflowContext) -> None:
+        """Implements handle start.
+        
+        Args:
+            self: Description of self.
+            msg: Description of msg.
+            ctx: Description of ctx.
+        """
+        await ctx.request_info(
+            request_data=CheckpointRequest(prompt=f"First request for: {msg}"),
+            response_type=str,
+        )
+
+    @response_handler
+    async def handle_response(
+        self,
+        original_request: CheckpointRequest,
+        response: str,
+        ctx: WorkflowContext[Never, bool],  # type: ignore[valid-type]
+    ) -> None:
+        """Implements handle response.
+        
+        Args:
+            self: Description of self.
+            original_request: Description of original_request.
+            response: Description of response.
+            ctx: Description of ctx.
+        """
+        self._responses.append(response)
+        if len(self._responses) == 1:
+            # First response received, make second request
+            await ctx.request_info(
+                request_data=CheckpointRequest(prompt="Second request"),
+                response_type=str,
+            )
+        else:
+            # Second response received, yield final output
+            await ctx.yield_output(True)
+
+    async def on_checkpoint_save(self) -> dict[str, Any]:
+        """Implements on checkpoint save.
+        
+        Args:
+            self: Description of self.
+        
+        Returns:
+            Description of the return value.
+        """
+        return {"responses": self._responses}
+
+    async def on_checkpoint_restore(self, state: dict[str, Any]) -> None:
+        """Implements on checkpoint restore.
+        
+        Args:
+            self: Description of self.
+            state: Description of state.
+        """
+        self._responses = state.get("responses", [])
+
+
+class CheckpointTestCoordinator(Executor):
+    """Coordinator for checkpoint sub-workflow tests."""
+
+    def __init__(self) -> None:
+        """Initializes a new instance.
+        
+        Args:
+            self: Description of self.
+        """
+        super().__init__(id="checkpoint_coordinator")
+        self._pending_requests: dict[str, SubWorkflowRequestMessage] = {}
+
+    @handler
+    async def start(self, value: str, ctx: WorkflowContext[str]) -> None:
+        """Implements start.
+        
+        Args:
+            self: Description of self.
+            value: Description of value.
+            ctx: Description of ctx.
+        """
+        await ctx.send_message(value)
+
+    @handler
+    async def handle_sub_workflow_request(
+        self,
+        request: SubWorkflowRequestMessage,
+        ctx: WorkflowContext,
+    ) -> None:
+        """Implements handle sub workflow request.
+        
+        Args:
+            self: Description of self.
+            request: Description of request.
+            ctx: Description of ctx.
+        """
+        data = request.source_event.data
+        if isinstance(data, CheckpointRequest):
+            self._pending_requests[data.id] = request
+            await ctx.request_info(data, str)
+
+    @response_handler
+    async def handle_response(
+        self,
+        original_request: CheckpointRequest,
+        response: str,
+        ctx: WorkflowContext[SubWorkflowResponseMessage],
+    ) -> None:
+        """Implements handle response.
+        
+        Args:
+            self: Description of self.
+            original_request: Description of original_request.
+            response: Description of response.
+            ctx: Description of ctx.
+        """
+        sub_request = self._pending_requests.pop(original_request.id, None)
+        if sub_request is None:
+            raise ValueError(f"No pending request for ID: {original_request.id}")
+        await ctx.send_message(sub_request.create_response(response))
+
+    async def on_checkpoint_save(self) -> dict[str, Any]:
+        """Implements on checkpoint save.
+        
+        Args:
+            self: Description of self.
+        
+        Returns:
+            Description of the return value.
+        """
+        return {"pending_requests": self._pending_requests}
+
+    async def on_checkpoint_restore(self, state: dict[str, Any]) -> None:
+        """Implements on checkpoint restore.
+        
+        Args:
+            self: Description of self.
+            state: Description of state.
+        """
+        self._pending_requests = state.get("pending_requests", {})
+
+
+def _build_checkpoint_test_workflow(storage: InMemoryCheckpointStorage) -> Workflow:
+    """Build the main workflow with checkpointing for testing."""
+    two_step_executor = TwoStepSubWorkflowExecutor()
+    sub_workflow = WorkflowBuilder(start_executor=two_step_executor).build()
+    sub_workflow_executor = WorkflowExecutor(sub_workflow, id="sub_workflow_executor")
+
+    coordinator = CheckpointTestCoordinator()
+    return (
+        WorkflowBuilder(start_executor=coordinator, checkpoint_storage=storage)
+        .add_edge(coordinator, sub_workflow_executor)
+        .add_edge(sub_workflow_executor, coordinator)
+        .build()
+    )
+
+
+async def test_sub_workflow_checkpoint_restore_no_duplicate_requests() -> None:
+    """Test that resuming a sub-workflow from checkpoint does not emit duplicate requests.
+
+    This test verifies the fix for an issue where after checkpoint restore, when a response
+    is sent to a sub-workflow, duplicate RequestInfoEvents were emitted. The bug occurred
+    because checkpoint rehydration re-added RequestInfoEvents to the event queue, and when
+    the workflow was resumed, those events were emitted again along with any new requests.
+
+    The fix ensures that already-handled requests are filtered out from the result when
+    the sub-workflow is resumed with responses.
+    """
+    storage = InMemoryCheckpointStorage()
+
+    # Step 1: Run workflow until first request
+    workflow1 = _build_checkpoint_test_workflow(storage)
+
+    first_request_id: str | None = None
+    async for event in workflow1.run("test_value", stream=True):
+        if event.type == "request_info":
+            first_request_id = event.request_id
+
+    assert first_request_id is not None
+
+    # Get checkpoint
+    checkpoints = await storage.list_checkpoints(workflow_name=workflow1.name)
+    checkpoint_id = max(checkpoints, key=lambda cp: cp.iteration_count).checkpoint_id
+
+    # Step 2: Resume workflow from checkpoint
+    workflow2 = _build_checkpoint_test_workflow(storage)
+
+    resumed_first_request_id: str | None = None
+    async for event in workflow2.run(checkpoint_id=checkpoint_id, stream=True):
+        if event.type == "request_info":
+            resumed_first_request_id = event.request_id
+
+    assert resumed_first_request_id is not None
+    assert resumed_first_request_id == first_request_id
+
+    request_events: list[WorkflowEvent] = []
+    async for event in workflow2.run(stream=True, responses={resumed_first_request_id: "first_answer"}):
+        if event.type == "request_info":
+            request_events.append(event)
+
+    # Key assertion: Only the second request should be received, not a duplicate of the first
+    assert len(request_events) == 1
+    assert request_events[0].data.prompt == "Second request"
+
+
+async def test_sub_workflow_checkpoint_restore_preserves_sub_workflow_state() -> None:
+    """Resuming a sub-workflow mid-progress must restore its internal executor state.
+
+    Regression guard for the issue where only the WorkflowExecutor's bookkeeping (pending
+    requests) was checkpointed, so a sub-workflow executor that accumulates state across
+    multiple request/response cycles (here ``TwoStepSubWorkflowExecutor._responses``) lost
+    that state on resume. With the sub-workflow's own checkpoint embedded in the parent
+    checkpoint, the second response now completes the two-step flow instead of triggering a
+    spurious third request.
+    """
+    storage = InMemoryCheckpointStorage()
+
+    # Step 1: run until the first request.
+    workflow1 = _build_checkpoint_test_workflow(storage)
+    first_request_id: str | None = None
+    async for event in workflow1.run("test_value", stream=True):
+        if event.type == "request_info":
+            first_request_id = event.request_id
+    assert first_request_id is not None
+
+    # Step 2: answer the first request so the sub-workflow accumulates internal state
+    # (``_responses == ["first_answer"]``) and emits the second request. This mid-progress
+    # point is what we checkpoint and resume from - the case the no-duplicate test (which
+    # checkpoints at the first request, before any state accrues) does not cover.
+    second_request_id: str | None = None
+    async for event in workflow1.run(stream=True, responses={first_request_id: "first_answer"}):
+        if event.type == "request_info":
+            second_request_id = event.request_id
+    assert second_request_id is not None
+
+    # Resume from the latest checkpoint (captured after the second request was made).
+    checkpoints = await storage.list_checkpoints(workflow_name=workflow1.name)
+    checkpoint_id = max(checkpoints, key=lambda cp: cp.iteration_count).checkpoint_id
+
+    workflow2 = _build_checkpoint_test_workflow(storage)
+    resumed_second_request_id: str | None = None
+    async for event in workflow2.run(checkpoint_id=checkpoint_id, stream=True):
+        if event.type == "request_info":
+            resumed_second_request_id = event.request_id
+    assert resumed_second_request_id is not None
+    assert resumed_second_request_id == second_request_id
+
+    # Step 3: answer the second request. With the sub-workflow's state restored, the two-step
+    # executor completes instead of emitting a spurious third request. If the internal state
+    # were lost, the second answer would be treated as a first answer and a third request
+    # ("Second request") would be emitted.
+    result = await workflow2.run(responses={resumed_second_request_id: "second_answer"})
+    assert result.get_request_info_events() == [], (
+        "Sub-workflow internal state was lost on resume: a spurious extra request was emitted"
+    )
+    assert result.get_final_state() == WorkflowRunState.IDLE
+
+
+@dataclass
+class FanInResult:
+    """Result yielded by the fan-in sub-workflow."""
+
+    value: str
+
+
+class FanInSubWorkflowFast(Executor):
+    """Sub-workflow branch that reaches the fan-in immediately."""
+
+    def __init__(self) -> None:
+        """Initializes a new instance.
+        
+        Args:
+            self: Description of self.
+        """
+        super().__init__(id="fan_in_fast")
+
+    @handler
+    async def run(self, message: str, ctx: WorkflowContext[str]) -> None:
+        """Implements run.
+        
+        Args:
+            self: Description of self.
+            message: Description of message.
+            ctx: Description of ctx.
+        """
+        await ctx.send_message(f"{message}-fast")
+
+
+class FanInSubWorkflowAsk(Executor):
+    """Sub-workflow branch that pauses on a request before reaching the fan-in."""
+
+    def __init__(self) -> None:
+        """Initializes a new instance.
+        
+        Args:
+            self: Description of self.
+        """
+        super().__init__(id="fan_in_ask")
+
+    @handler
+    async def run(self, message: str, ctx: WorkflowContext) -> None:
+        """Implements run.
+        
+        Args:
+            self: Description of self.
+            message: Description of message.
+            ctx: Description of ctx.
+        """
+        await ctx.request_info(request_data=CheckpointRequest(prompt=message), response_type=str)
+
+    @response_handler
+    async def handle_response(
+        self,
+        original_request: CheckpointRequest,
+        response: str,
+        ctx: WorkflowContext[str],
+    ) -> None:
+        """Implements handle response.
+        
+        Args:
+            self: Description of self.
+            original_request: Description of original_request.
+            response: Description of response.
+            ctx: Description of ctx.
+        """
+        await ctx.send_message(response)
+
+
+class FanInSubWorkflowJoiner(Executor):
+    """Sub-workflow fan-in target."""
+
+    def __init__(self) -> None:
+        """Initializes a new instance.
+        
+        Args:
+            self: Description of self.
+        """
+        super().__init__(id="fan_in_joiner")
+
+    @handler
+    async def join(self, messages: list[str], ctx: WorkflowContext[Never, FanInResult]) -> None:  # type: ignore[valid-type]
+        """Implements join.
+        
+        Args:
+            self: Description of self.
+            messages: Description of messages.
+            ctx: Description of ctx.
+        """
+        await ctx.yield_output(FanInResult(value=", ".join(sorted(messages))))
+
+
+class FanInCheckpointCoordinator(Executor):
+    """Parent coordinator that forwards the sub-workflow's request and yields its result."""
+
+    def __init__(self) -> None:
+        """Initializes a new instance.
+        
+        Args:
+            self: Description of self.
+        """
+        super().__init__(id="fan_in_coordinator")
+        self._pending_requests: dict[str, SubWorkflowRequestMessage] = {}
+
+    @handler
+    async def start(self, value: str, ctx: WorkflowContext[str]) -> None:
+        """Implements start.
+        
+        Args:
+            self: Description of self.
+            value: Description of value.
+            ctx: Description of ctx.
+        """
+        await ctx.send_message(value)
+
+    @handler
+    async def handle_sub_workflow_request(self, request: SubWorkflowRequestMessage, ctx: WorkflowContext) -> None:
+        """Implements handle sub workflow request.
+        
+        Args:
+            self: Description of self.
+            request: Description of request.
+            ctx: Description of ctx.
+        """
+        data = request.source_event.data
+        if isinstance(data, CheckpointRequest):
+            self._pending_requests[data.id] = request
+            await ctx.request_info(data, str)
+
+    @handler
+    async def handle_sub_workflow_result(self, result: FanInResult, ctx: WorkflowContext[Never, str]) -> None:  # type: ignore[valid-type]
+        """Implements handle sub workflow result.
+        
+        Args:
+            self: Description of self.
+            result: Description of result.
+            ctx: Description of ctx.
+        """
+        await ctx.yield_output(result.value)
+
+    @response_handler
+    async def handle_response(
+        self,
+        original_request: CheckpointRequest,
+        response: str,
+        ctx: WorkflowContext[SubWorkflowResponseMessage],
+    ) -> None:
+        """Implements handle response.
+        
+        Args:
+            self: Description of self.
+            original_request: Description of original_request.
+            response: Description of response.
+            ctx: Description of ctx.
+        """
+        sub_request = self._pending_requests.pop(original_request.id, None)
+        if sub_request is None:
+            raise ValueError(f"No pending request for ID: {original_request.id}")
+        await ctx.send_message(sub_request.create_response(response))
+
+    async def on_checkpoint_save(self) -> dict[str, Any]:
+        """Implements on checkpoint save.
+        
+        Args:
+            self: Description of self.
+        
+        Returns:
+            Description of the return value.
+        """
+        return {"pending_requests": self._pending_requests}
+
+    async def on_checkpoint_restore(self, state: dict[str, Any]) -> None:
+        """Implements on checkpoint restore.
+        
+        Args:
+            self: Description of self.
+            state: Description of state.
+        """
+        self._pending_requests = state.get("pending_requests", {})
+
+
+def _build_fan_in_sub_workflow(storage: InMemoryCheckpointStorage) -> Workflow:
+    """Build a parent workflow whose sub-workflow pauses with a half-filled fan-in."""
+    start = FanInSubWorkflowFast()
+    ask = FanInSubWorkflowAsk()
+    joiner = FanInSubWorkflowJoiner()
+    sub_workflow = (
+        WorkflowBuilder(start_executor=start).add_edge(start, ask).add_fan_in_edges([start, ask], joiner).build()
+    )
+    sub_workflow_executor = WorkflowExecutor(sub_workflow, id="fan_in_sub_workflow_executor")
+
+    coordinator = FanInCheckpointCoordinator()
+    return (
+        WorkflowBuilder(start_executor=coordinator, checkpoint_storage=storage)
+        .add_edge(coordinator, sub_workflow_executor)
+        .add_edge(sub_workflow_executor, coordinator)
+        .build()
+    )
+
+
+async def test_sub_workflow_checkpoint_restore_preserves_partially_filled_fan_in() -> None:
+    """A sub-workflow that pauses with a half-filled fan-in must keep those messages on resume.
+
+    The sub-workflow's own checkpoint is embedded in the parent checkpoint, so the fast
+    branch's message - already drained out of the sub-workflow's runner context and into the
+    fan-in buffer - only survives if the buffer travels with that checkpoint.
+    """
+    storage = InMemoryCheckpointStorage()
+
+    workflow1 = _build_fan_in_sub_workflow(storage)
+    request_id: str | None = None
+    async for event in workflow1.run("seed", stream=True):
+        if event.type == "request_info":
+            request_id = event.request_id
+    assert request_id is not None
+
+    checkpoints = await storage.list_checkpoints(workflow_name=workflow1.name)
+    checkpoint_id = max(checkpoints, key=lambda cp: cp.iteration_count).checkpoint_id
+
+    # Resume on a fresh instance, whose sub-workflow has new edge group ids, then answer the
+    # request so the second branch finally reaches the fan-in.
+    workflow2 = _build_fan_in_sub_workflow(storage)
+    resumed_request_id: str | None = None
+    async for event in workflow2.run(checkpoint_id=checkpoint_id, stream=True):
+        if event.type == "request_info":
+            resumed_request_id = event.request_id
+    assert resumed_request_id is not None
+
+    result = await workflow2.run(responses={resumed_request_id: "answered"})
+
+    assert result.get_outputs() == ["answered, seed-fast"]
+
+
+async def test_sub_workflow_intermediate_outputs_propagate_to_parent() -> None:
+    """A child workflow's intermediate emissions must bubble up through the parent.
+
+    Regression guard for the bug where WorkflowExecutor._process_workflow_result only
+    forwarded result.get_outputs() and silently dropped result.get_intermediate_outputs().
+    The forwarded event must carry the WorkflowExecutor's own id as the source so outer
+    callers don't have to know the child's internal executor layout, and it must keep
+    type='intermediate' regardless of how the parent designates the WorkflowExecutor.
+    """
+
+    class _ProgressEmitter(Executor):
+        """Represents the _ProgressEmitter type and related behavior.
+        """
+        def __init__(self) -> None:
+            """Initializes a new instance.
+            
+            Args:
+                self: Description of self.
+            """
+            super().__init__(id="progress_emitter")
+
+        @handler
+        async def run(self, message: str, ctx: WorkflowContext[str, str]) -> None:
+            """Implements run.
+            
+            Args:
+                self: Description of self.
+                message: Description of message.
+                ctx: Description of ctx.
+            """
+            await ctx.yield_output(f"progress: {message}")
+            await ctx.send_message(message)
+
+    class _Finalizer(Executor):
+        """Represents the _Finalizer type and related behavior.
+        """
+        def __init__(self) -> None:
+            """Initializes a new instance.
+            
+            Args:
+                self: Description of self.
+            """
+            super().__init__(id="finalizer")
+
+        @handler
+        async def run(self, message: str, ctx: WorkflowContext[Never, str]) -> None:  # type: ignore[valid-type]
+            """Implements run.
+            
+            Args:
+                self: Description of self.
+                message: Description of message.
+                ctx: Description of ctx.
+            """
+            await ctx.yield_output(f"final: {message}")
+
+    progress = _ProgressEmitter()
+    finalizer = _Finalizer()
+    child = (
+        WorkflowBuilder(
+            start_executor=progress,
+            output_from=[finalizer],
+            intermediate_output_from=[progress],
+        )
+        .add_edge(progress, finalizer)
+        .build()
+    )
+
+    sub = WorkflowExecutor(child, id="sub")
+
+    class _ParentSink(Executor):
+        """Represents the _ParentSink type and related behavior.
+        """
+        def __init__(self) -> None:
+            """Initializes a new instance.
+            
+            Args:
+                self: Description of self.
+            """
+            super().__init__(id="parent_sink")
+            self.received: list[str] = []
+
+        @handler
+        async def run(self, message: str, ctx: WorkflowContext[Never, str]) -> None:  # type: ignore[valid-type]
+            """Implements run.
+            
+            Args:
+                self: Description of self.
+                message: Description of message.
+                ctx: Description of ctx.
+            """
+            self.received.append(message)
+            await ctx.yield_output(message)
+
+    sink = _ParentSink()
+    parent = WorkflowBuilder(start_executor=sub, output_from=[sink]).add_edge(sub, sink).build()
+
+    intermediate_events: list[WorkflowEvent[Any]] = []
+    output_events: list[WorkflowEvent[Any]] = []
+    async for event in parent.run("hello", stream=True):
+        if event.type == "intermediate":
+            intermediate_events.append(event)
+        elif event.type == "output":
+            output_events.append(event)
+
+    # The child's intermediate emission bubbled up labeled with the WorkflowExecutor id,
+    # not the child's internal executor id.
+    assert len(intermediate_events) == 1, [(e.executor_id, e.data) for e in intermediate_events]
+    assert intermediate_events[0].executor_id == "sub"
+    assert intermediate_events[0].data == "progress: hello"
+
+    # The parent's own terminal output is unaffected.
+    assert any(e.executor_id == "parent_sink" and e.data == "final: hello" for e in output_events)
+
+
+async def test_workflow_executor_orphaned_output_forward_cannot_repopulate_a_restored_message_queue() -> None:
+    """The orphaned-task race from PR #7948 applies to WorkflowExecutor's own output-forwarding gather too.
+
+    That PR's review excluded ``_workflow_executor.py``'s ``gather()`` sites with "none of them hold
+    cross-invocation buffered state a restore can race with" - that reasoning was wrong. When
+    ``allow_direct_output`` is false (the default), ``_process_workflow_result`` forwards every
+    sub-workflow output to the parent by gathering ``ctx.send_message(output)`` per output.
+    ``WorkflowContext.send_message`` reaches straight into ``RunnerContext._messages`` with no
+    precondition check (unlike, say, ``send_request_info_response``'s pop-and-validate, which turned
+    out to protect a sibling gather site in ``_workflow.py``). A sibling output still being sent when
+    another fails is therefore not cancelled by plain ``asyncio.gather``, and can append into the
+    parent's message queue after a checkpoint restore has already cleared it for the resumed run.
+    """
+
+    class _Inner(Executor):
+        """Represents the _Inner type and related behavior.
+        """
+        @handler
+        async def handle(self, message: str, ctx: WorkflowContext[str]) -> None:
+            """Implements handle.
+            
+            Args:
+                self: Description of self.
+                message: Description of message.
+                ctx: Description of ctx.
+            """
+            pass
+
+    inner_workflow = WorkflowBuilder(start_executor=_Inner(id="inner")).build()
+    workflow_executor = WorkflowExecutor(inner_workflow, id="wrapped")
+
+    ctx_impl = InProcRunnerContext()
+    state = State()
+    wctx: WorkflowContext[Any] = WorkflowContext(workflow_executor, ["parent_source"], state, ctx_impl)
+
+    entered_delay = asyncio.Event()
+    release = asyncio.Event()
+    real_send_message = ctx_impl.send_message
+
+    async def patched_send_message(message: WorkflowMessage) -> None:
+        """Implements patched send message.
+        
+        Args:
+            message: Description of message.
+        """
+        if message.data == "bad-output":
+            raise RuntimeError("output send failed")
+        if message.data == "stale-output-from-failed-run":
+            entered_delay.set()
+            await release.wait()
+        await real_send_message(message)
+
+    ctx_impl.send_message = patched_send_message  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
+
+    # allow_direct_output defaults to False, so outputs go through the ctx.send_message branch.
+    # A status event is required for get_final_state(), which _process_workflow_result reads before
+    # the gather; without it the method raises immediately and entered_delay is never set.
+    result = WorkflowRunResult(
+        [
+            WorkflowEvent("output", data="bad-output"),
+            WorkflowEvent("output", data="stale-output-from-failed-run"),
+        ],
+        status_events=[WorkflowEvent.status(WorkflowRunState.IDLE)],
+    )
+
+    task = asyncio.create_task(workflow_executor._process_workflow_result(result, wctx))  # pyright: ignore[reportPrivateUsage]
+
+    # The second output's send is now parked mid-flight when the first one raises.
+    await asyncio.wait_for(entered_delay.wait(), timeout=5)
+
+    with pytest.raises(RuntimeError, match="output send failed"):
+        await task
+
+    # The parent restores the same runner context from its last good checkpoint - what a caller does
+    # after catching a failed superstep, per Workflow._execute_with_message_or_checkpoint.
+    checkpoint = WorkflowCheckpoint(workflow_name="test_name", graph_signature_hash="test_hash")
+    await ctx_impl.apply_checkpoint(checkpoint)
+    assert not await ctx_impl.has_messages()
+
+    # Release the parked send. If the fix reached this gather, its task was already cancelled and
+    # this is a no-op; if it did not, the stale output lands in the just-restored queue.
+    release.set()
+    await asyncio.sleep(0)
+
+    assert not await ctx_impl.has_messages()

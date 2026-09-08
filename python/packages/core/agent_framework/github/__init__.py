@@ -1,0 +1,53 @@
+# Copyright (c) Microsoft. All rights reserved.
+
+"""GitHub integration namespace for optional Agent Framework connectors.
+
+This module lazily re-exports objects from:
+- ``agent-framework-github-copilot``
+
+Supported classes:
+- GitHubCopilotAgent
+- GitHubCopilotOptions
+- GitHubCopilotSettings
+- RawGitHubCopilotAgent
+"""
+
+import importlib
+from typing import Any
+
+_IMPORTS: dict[str, tuple[str, str]] = {
+    "GitHubCopilotAgent": ("agent_framework_github_copilot", "agent-framework-github-copilot"),
+    "GitHubCopilotOptions": ("agent_framework_github_copilot", "agent-framework-github-copilot"),
+    "GitHubCopilotSettings": ("agent_framework_github_copilot", "agent-framework-github-copilot"),
+    "RawGitHubCopilotAgent": ("agent_framework_github_copilot", "agent-framework-github-copilot"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Implements   getattr  .
+    
+    Args:
+        name: Description of name.
+    
+    Returns:
+        Description of the return value.
+    """
+    if name in _IMPORTS:
+        import_path, package_name = _IMPORTS[name]
+        try:
+            return getattr(importlib.import_module(import_path), name)
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                f"The package {package_name} is required to use `{name}`. "
+                f"Please use `pip install {package_name}`, or update your requirements.txt or pyproject.toml file."
+            ) from exc
+    raise AttributeError(f"Module `agent_framework.github` has no attribute {name}.")
+
+
+def __dir__() -> list[str]:
+    """Implements   dir  .
+    
+    Returns:
+        Description of the return value.
+    """
+    return list(_IMPORTS.keys())
