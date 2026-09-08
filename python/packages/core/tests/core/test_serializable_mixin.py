@@ -1,0 +1,1225 @@
+# Copyright (c) Microsoft. All rights reserved.
+
+"""Tests for SerializationMixin functionality."""
+
+import copy
+import json
+import logging
+from datetime import date, datetime, time
+from typing import Any
+
+import pytest
+from typing_extensions import Self
+
+from agent_framework._serialization import SerializationMixin
+
+
+class TestSerializationMixin:
+    """Test SerializationMixin serialization, deserialization, and dependency injection."""
+
+    def test_basic_serialization(self):
+        """Test basic to_dict and from_dict functionality."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            def __init__(self, value: str, number: int):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    value: Description of value.
+                    number: Description of number.
+                """
+                self.value = value
+                self.number = number
+
+        obj = TestClass(value="test", number=42)
+        data = obj.to_dict()
+
+        assert data["type"] == "test_class"
+        assert data["value"] == "test"
+        assert data["number"] == 42
+
+        restored = TestClass.from_dict(data)
+        assert restored.value == "test"
+        assert restored.number == 42
+
+    def test_injectable_dependency_no_warning(self, caplog):
+        """Test that injectable dependencies don't trigger debug logging."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            INJECTABLE = {"client"}
+
+            def __init__(self, value: str, client: Any = None):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    value: Description of value.
+                    client: Description of client.
+                """
+                self.value = value
+                self.client = client
+
+        mock_client = "mock_client_instance"
+
+        with caplog.at_level(logging.DEBUG):
+            obj = TestClass.from_dict(
+                {"type": "test_class", "value": "test"},
+                dependencies={"test_class": {"client": mock_client}},
+            )
+
+        assert obj.value == "test"
+        assert obj.client == mock_client
+        # No debug message should be logged for injectable dependency
+        assert not any("is not in INJECTABLE set" in record.message for record in caplog.records)
+
+    def test_non_injectable_dependency_logs_debug(self, caplog):
+        """Test that non-injectable dependencies trigger debug logging."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            INJECTABLE = {"client"}
+
+            def __init__(self, value: str, other: Any = None):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    value: Description of value.
+                    other: Description of other.
+                """
+                self.value = value
+                self.other = other
+
+        mock_other = "mock_other_instance"
+
+        with caplog.at_level(logging.DEBUG):
+            obj = TestClass.from_dict(
+                {"type": "test_class", "value": "test"},
+                dependencies={"test_class": {"other": mock_other}},
+            )
+
+        assert obj.value == "test"
+        assert obj.other == mock_other
+        # Debug message should be logged for non-injectable dependency
+        debug_messages = [record.message for record in caplog.records if record.levelname == "DEBUG"]
+        assert any("is not in INJECTABLE set" in msg for msg in debug_messages)
+        assert any("other" in msg for msg in debug_messages)
+        assert any("client" in msg for msg in debug_messages)  # Should mention available injectable
+
+    def test_multiple_dependencies_mixed_injectable(self, caplog):
+        """Test with both injectable and non-injectable dependencies."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            INJECTABLE = {"client", "logger"}
+
+            def __init__(
+                self,
+                value: str,
+                client: Any = None,
+                logger: Any = None,
+                other: Any = None,
+            ):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    value: Description of value.
+                    client: Description of client.
+                    logger: Description of logger.
+                    other: Description of other.
+                """
+                self.value = value
+                self.client = client
+                self.logger = logger
+                self.other = other
+
+        mock_client = "mock_client"
+        mock_logger = "mock_logger"
+        mock_other = "mock_other"
+
+        with caplog.at_level(logging.DEBUG):
+            obj = TestClass.from_dict(
+                {"type": "test_class", "value": "test"},
+                dependencies={
+                    "test_class": {
+                        "client": mock_client,
+                        "logger": mock_logger,
+                        "other": mock_other,
+                    }
+                },
+            )
+
+        assert obj.value == "test"
+        assert obj.client == mock_client
+        assert obj.logger == mock_logger
+        assert obj.other == mock_other
+
+        # Only 'other' should trigger debug logging
+        debug_messages = [record.message for record in caplog.records if record.levelname == "DEBUG"]
+        assert any("other" in msg and "is not in INJECTABLE set" in msg for msg in debug_messages)
+        # 'client' and 'logger' should not be mentioned as non-injectable dependencies
+        assert not any("Dependency 'client'" in msg and "is not in INJECTABLE set" in msg for msg in debug_messages)
+        assert not any("Dependency 'logger'" in msg and "is not in INJECTABLE set" in msg for msg in debug_messages)
+
+    def test_no_injectable_set_defined(self, caplog):
+        """Test behavior when INJECTABLE is not defined (empty set default)."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            def __init__(self, value: str, client: Any = None):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    value: Description of value.
+                    client: Description of client.
+                """
+                self.value = value
+                self.client = client
+
+        mock_client = "mock_client"
+
+        with caplog.at_level(logging.DEBUG):
+            obj = TestClass.from_dict(
+                {"type": "test_class", "value": "test"},
+                dependencies={"test_class": {"client": mock_client}},
+            )
+
+        assert obj.value == "test"
+        assert obj.client == mock_client
+        # Should log debug message since INJECTABLE is empty by default
+        debug_messages = [record.message for record in caplog.records if record.levelname == "DEBUG"]
+        assert any("client" in msg and "is not in INJECTABLE set" in msg for msg in debug_messages)
+
+    def test_default_exclude_serialization(self):
+        """Test that DEFAULT_EXCLUDE fields are not included in to_dict()."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            DEFAULT_EXCLUDE = {"secret"}
+
+            def __init__(self, value: str, secret: str):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    value: Description of value.
+                    secret: Description of secret.
+                """
+                self.value = value
+                self.secret = secret
+
+        obj = TestClass(value="test", secret="hidden")
+        data = obj.to_dict()
+
+        assert "value" in data
+        assert "secret" not in data
+        assert data["value"] == "test"
+
+    def test_roundtrip_with_injectable_dependency(self):
+        """Test full roundtrip serialization/deserialization with injectable dependency."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            INJECTABLE = {"client"}
+            DEFAULT_EXCLUDE = {"client"}
+
+            def __init__(self, value: str, number: int, client: Any = None):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    value: Description of value.
+                    number: Description of number.
+                    client: Description of client.
+                """
+                self.value = value
+                self.number = number
+                self.client = client
+
+        mock_client = "mock_client"
+        obj = TestClass(value="test", number=42, client=mock_client)
+
+        # Serialize
+        data = obj.to_dict()
+        assert data["value"] == "test"
+        assert data["number"] == 42
+        assert "client" not in data  # Excluded from serialization
+
+        # Deserialize with dependency injection
+        restored = TestClass.from_dict(data, dependencies={"test_class": {"client": mock_client}})
+        assert restored.value == "test"
+        assert restored.number == 42
+        assert restored.client == mock_client
+
+    def test_exclude_none_in_to_dict(self):
+        """Test that exclude_none parameter removes None values from to_dict()."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            def __init__(self, value: str, optional: str | None = None):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    value: Description of value.
+                    optional: Description of optional.
+                """
+                self.value = value
+                self.optional = optional
+
+        obj = TestClass(value="test", optional=None)
+        data = obj.to_dict(exclude_none=True)
+
+        assert data["value"] == "test"
+        assert "optional" not in data
+
+    def test_to_dict_with_nested_serialization_protocol(self):
+        """Test to_dict handles nested SerializationProtocol objects."""
+
+        class InnerClass(SerializationMixin):
+            """Represents the InnerClass type and related behavior.
+            """
+            def __init__(self, inner_value: str):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    inner_value: Description of inner_value.
+                """
+                self.inner_value = inner_value
+
+        class OuterClass(SerializationMixin):
+            """Represents the OuterClass type and related behavior.
+            """
+            def __init__(self, outer_value: str, inner: Any = None):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    outer_value: Description of outer_value.
+                    inner: Description of inner.
+                """
+                self.outer_value = outer_value
+                self.inner = inner
+
+        inner = InnerClass(inner_value="inner_test")
+        outer = OuterClass(outer_value="outer_test", inner=inner)
+        data = outer.to_dict()
+
+        assert data["outer_value"] == "outer_test"
+        assert data["inner"]["inner_value"] == "inner_test"
+
+    def test_to_dict_with_nested_structural_serialization_protocol(self):
+        """Test to_dict handles a structural protocol implementation without the mixin."""
+
+        class InnerClass:
+            """Represents the InnerClass type and related behavior.
+            """
+            def __init__(self, inner_value: str):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    inner_value: Description of inner_value.
+                """
+                self.inner_value = inner_value
+
+            def to_dict(self, **kwargs: Any) -> dict[str, Any]:
+                """Implements to dict.
+                
+                Args:
+                    self: Description of self.
+                    **kwargs: Description of kwargs.
+                
+                Returns:
+                    Description of the return value.
+                """
+                return {"inner_value": self.inner_value}
+
+            @classmethod
+            def from_dict(cls, value: dict[str, Any], **kwargs: Any) -> Self:
+                """Implements from dict.
+                
+                Args:
+                    cls: Description of cls.
+                    value: Description of value.
+                    **kwargs: Description of kwargs.
+                
+                Returns:
+                    Description of the return value.
+                """
+                return cls(value["inner_value"])
+
+        class OuterClass(SerializationMixin):
+            """Represents the OuterClass type and related behavior.
+            """
+            def __init__(self, inner: InnerClass):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    inner: Description of inner.
+                """
+                self.inner = inner
+
+        assert OuterClass(InnerClass("inner_test")).to_dict()["inner"] == {"inner_value": "inner_test"}
+
+    def test_to_dict_with_list_of_serialization_protocol(self):
+        """Test to_dict handles lists containing SerializationProtocol objects."""
+
+        class ItemClass(SerializationMixin):
+            """Represents the ItemClass type and related behavior.
+            """
+            def __init__(self, name: str):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    name: Description of name.
+                """
+                self.name = name
+
+        class ContainerClass(SerializationMixin):
+            """Represents the ContainerClass type and related behavior.
+            """
+            def __init__(self, items: list):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    items: Description of items.
+                """
+                self.items = items
+
+        items = [ItemClass(name="item1"), ItemClass(name="item2")]
+        container = ContainerClass(items=items)
+        data = container.to_dict()
+
+        assert len(data["items"]) == 2
+        assert data["items"][0]["name"] == "item1"
+        assert data["items"][1]["name"] == "item2"
+
+    def test_to_dict_skips_non_serializable_in_list(self, caplog):
+        """Test to_dict skips non-serializable items in lists with debug logging."""
+
+        class NonSerializable:
+            """Represents the NonSerializable type and related behavior.
+            """
+            pass
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            def __init__(self, items: list):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    items: Description of items.
+                """
+                self.items = items
+
+        obj = TestClass(items=["serializable", NonSerializable()])
+
+        with caplog.at_level(logging.DEBUG):
+            data = obj.to_dict()
+
+        # Should only contain the serializable item
+        assert len(data["items"]) == 1
+        assert data["items"][0] == "serializable"
+
+    def test_to_dict_with_dict_containing_serialization_protocol(self):
+        """Test to_dict handles dicts containing SerializationProtocol values."""
+
+        class ItemClass(SerializationMixin):
+            """Represents the ItemClass type and related behavior.
+            """
+            def __init__(self, name: str):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    name: Description of name.
+                """
+                self.name = name
+
+        class ContainerClass(SerializationMixin):
+            """Represents the ContainerClass type and related behavior.
+            """
+            def __init__(self, items_dict: dict):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    items_dict: Description of items_dict.
+                """
+                self.items_dict = items_dict
+
+        items = {"a": ItemClass(name="item1"), "b": ItemClass(name="item2")}
+        container = ContainerClass(items_dict=items)
+        data = container.to_dict()
+
+        assert data["items_dict"]["a"]["name"] == "item1"
+        assert data["items_dict"]["b"]["name"] == "item2"
+
+    def test_to_dict_recursively_serializes_nested_containers(self):
+        """Test to_dict serializes protocol objects nested in containers."""
+
+        class ItemClass(SerializationMixin):
+            """Represents the ItemClass type and related behavior.
+            """
+            def __init__(self, name: str):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    name: Description of name.
+                """
+                self.name = name
+
+        class ContainerClass(SerializationMixin):
+            """Represents the ContainerClass type and related behavior.
+            """
+            def __init__(self, payload: dict):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    payload: Description of payload.
+                """
+                self.payload = payload
+
+        container = ContainerClass(payload={"groups": [{"items": [ItemClass(name="item1")]}]})
+
+        data = container.to_dict()
+
+        assert data["payload"]["groups"][0]["items"][0]["name"] == "item1"
+        assert json.loads(container.to_json()) == data
+
+    def test_to_dict_preserves_nested_non_string_dict_keys(self):
+        """Test recursive serialization preserves non-string keys below the attribute dictionary."""
+
+        class ContainerClass(SerializationMixin):
+            """Represents the ContainerClass type and related behavior.
+            """
+            def __init__(self, payload: dict):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    payload: Description of payload.
+                """
+                self.payload = payload
+
+        container = ContainerClass(payload={7: "direct", "nested": {True: "enabled", None: "missing"}})
+
+        data = container.to_dict()
+
+        assert data["payload"]["7"] == "direct"
+        assert data["payload"]["nested"] == {True: "enabled", None: "missing"}
+        json_payload = json.loads(container.to_json())["payload"]
+        assert json_payload["7"] == "direct"
+        assert json_payload["nested"] == {"true": "enabled", "null": "missing"}
+
+    def test_to_dict_rejects_circular_list(self):
+        """Test recursive serialization reports a controlled error for a circular list."""
+
+        class ContainerClass(SerializationMixin):
+            """Represents the ContainerClass type and related behavior.
+            """
+            def __init__(self, payload: list[Any]):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    payload: Description of payload.
+                """
+                self.payload = payload
+
+        payload: list[Any] = []
+        payload.append(payload)
+
+        with pytest.raises(ValueError, match="Circular reference detected"):
+            ContainerClass(payload).to_dict()
+
+    def test_to_dict_rejects_circular_dict(self):
+        """Test recursive serialization reports a controlled error for a circular dictionary."""
+
+        class ContainerClass(SerializationMixin):
+            """Represents the ContainerClass type and related behavior.
+            """
+            def __init__(self, payload: dict[str, Any]):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    payload: Description of payload.
+                """
+                self.payload = payload
+
+        payload: dict[str, Any] = {}
+        payload["self"] = payload
+
+        with pytest.raises(ValueError, match="Circular reference detected"):
+            ContainerClass(payload).to_dict()
+
+    @pytest.mark.parametrize("value", [datetime(2025, 1, 27, 12), date(2025, 1, 27), time(12)])
+    def test_to_dict_only_converts_date_time_in_dict_values(self, value):
+        """Test to_dict preserves the existing date/time conversion contexts."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            def __init__(self):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                """
+                self.top_level = value
+                self.items = [value]
+                self.metadata = {"created_at": value}
+
+        data = TestClass().to_dict()
+
+        assert "top_level" not in data
+        assert data["items"] == []
+        assert data["metadata"]["created_at"] == str(value)
+
+    def test_to_dict_skips_non_serializable_in_dict(self, caplog):
+        """Test to_dict skips non-serializable values in dicts with debug logging."""
+
+        class NonSerializable:
+            """Represents the NonSerializable type and related behavior.
+            """
+            pass
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            def __init__(self, metadata: dict):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    metadata: Description of metadata.
+                """
+                self.metadata = metadata
+
+        obj = TestClass(metadata={"valid": "value", "invalid": NonSerializable()})
+
+        with caplog.at_level(logging.DEBUG):
+            data = obj.to_dict()
+
+        assert data["metadata"]["valid"] == "value"
+        assert "invalid" not in data["metadata"]
+
+    def test_to_dict_skips_non_serializable_attributes(self, caplog):
+        """Test to_dict skips non-serializable top-level attributes."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            def __init__(self, value: str, func: Any = None):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    value: Description of value.
+                    func: Description of func.
+                """
+                self.value = value
+                self.func = func
+
+        obj = TestClass(value="test", func=lambda x: x)
+
+        with caplog.at_level(logging.DEBUG):
+            data = obj.to_dict()
+
+        assert data["value"] == "test"
+        assert "func" not in data
+
+    def test_from_dict_without_type_in_data(self):
+        """Test from_dict uses class TYPE when no type field in data."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            TYPE = "my_custom_type"
+
+            def __init__(self, value: str):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    value: Description of value.
+                """
+                self.value = value
+
+        # Data without 'type' field - class TYPE should be used for type identifier
+        data = {"value": "test"}
+
+        obj = TestClass.from_dict(data)
+        assert obj.value == "test"
+
+        # Verify to_dict includes the type
+        out = obj.to_dict()
+        assert out["type"] == "my_custom_type"
+
+    def test_from_dict_rejects_mismatched_type(self):
+        """from_dict raises ValueError when the payload type doesn't match the class."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            def __init__(self, value: str):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    value: Description of value.
+                """
+                self.value = value
+
+        with pytest.raises(ValueError, match="Type mismatch: expected 'test_class', got 'function_tool'"):
+            TestClass.from_dict({"type": "function_tool", "value": "x"})
+
+    def test_from_json_rejects_mismatched_type(self):
+        """from_json surfaces the same mismatch error instead of silently coercing."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            def __init__(self, value: str):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    value: Description of value.
+                """
+                self.value = value
+
+        with pytest.raises(ValueError, match="Type mismatch"):
+            TestClass.from_json('{"type": "some_other_type", "value": "x"}')
+
+    def test_from_json(self):
+        """Test from_json deserializes JSON string."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            def __init__(self, value: str):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    value: Description of value.
+                """
+                self.value = value
+
+        json_str = '{"type": "test_class", "value": "test_value"}'
+        obj = TestClass.from_json(json_str)
+
+        assert obj.value == "test_value"
+
+    def test_get_type_identifier_with_instance_type(self):
+        """Test _get_type_identifier uses instance 'type' attribute."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            def __init__(self, value: str):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    value: Description of value.
+                """
+                self.value = value
+                self.type = "custom_type"
+
+        obj = TestClass(value="test")
+        data = obj.to_dict()
+
+        assert data["type"] == "custom_type"
+
+    def test_get_type_identifier_with_class_TYPE(self):
+        """Test _get_type_identifier uses class TYPE constant."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            TYPE = "class_level_type"
+
+            def __init__(self, value: str):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    value: Description of value.
+                """
+                self.value = value
+
+        obj = TestClass(value="test")
+        data = obj.to_dict()
+
+        assert data["type"] == "class_level_type"
+
+    def test_instance_specific_dependency_injection(self):
+        """Test instance-specific dependency injection with field:name format."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            INJECTABLE = {"config"}
+
+            def __init__(self, name: str, config: Any = None):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    name: Description of name.
+                    config: Description of config.
+                """
+                self.name = name
+                self.config = config
+
+        dependencies = {
+            "test_class": {
+                "name:special_instance": {"config": "special_config"},
+            }
+        }
+
+        # This should match the instance-specific dependency
+        obj = TestClass.from_dict({"type": "test_class", "name": "special_instance"}, dependencies=dependencies)
+
+        assert obj.name == "special_instance"
+        assert obj.config == "special_config"
+
+    def test_dependency_dict_merging(self):
+        """Test that dict dependencies are merged with existing dict kwargs."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            INJECTABLE = {"options"}
+
+            def __init__(self, value: str, options: dict | None = None):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    value: Description of value.
+                    options: Description of options.
+                """
+                self.value = value
+                self.options = options or {}
+
+        # Existing options in data
+        data = {"type": "test_class", "value": "test", "options": {"existing": "value"}}
+        # Additional options from dependencies
+        dependencies = {"test_class": {"options": {"injected": "option"}}}
+
+        obj = TestClass.from_dict(data, dependencies=dependencies)
+
+        assert obj.options["existing"] == "value"
+        assert obj.options["injected"] == "option"
+
+    def test_deepcopy_preserves_shallow_copy_fields_by_reference(self):
+        """Test that deepcopy keeps _SHALLOW_COPY_FIELDS fields as shallow references."""
+        import copy
+
+        class NonCopyable:
+            """Represents the NonCopyable type and related behavior.
+            """
+            def __deepcopy__(self, memo):
+                """Implements   deepcopy  .
+                
+                Args:
+                    self: Description of self.
+                    memo: Description of memo.
+                """
+                raise TypeError("cannot deepcopy")
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            _SHALLOW_COPY_FIELDS = {"raw_representation", "other_opaque"}
+
+            def __init__(self, items: list, raw_representation: Any = None, other_opaque: Any = None):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    items: Description of items.
+                    raw_representation: Description of raw_representation.
+                    other_opaque: Description of other_opaque.
+                """
+                self.items = items
+                self.raw_representation = raw_representation
+                self.other_opaque = other_opaque
+
+        raw = NonCopyable()
+        opaque = NonCopyable()
+        original_items = ["a", "b"]
+        obj = TestClass(items=original_items, raw_representation=raw, other_opaque=opaque)
+        cloned = copy.deepcopy(obj)
+
+        # _SHALLOW_COPY_FIELDS fields should be the same object (shallow copy)
+        assert cloned.raw_representation is raw
+        assert cloned.other_opaque is opaque
+        # Normal attributes should be independent copies
+        assert cloned.items is not original_items
+        assert cloned.items == ["a", "b"]
+
+    def test_deepcopy_deep_copies_non_shallow_copy_fields(self):
+        """Test that deepcopy fully copies fields not in _SHALLOW_COPY_FIELDS."""
+        import copy
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            _SHALLOW_COPY_FIELDS = {"raw_representation"}
+
+            def __init__(self, items: list, raw_representation: Any = None):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    items: Description of items.
+                    raw_representation: Description of raw_representation.
+                """
+                self.items = items
+                self.raw_representation = raw_representation
+
+        original_list = ["a", "b"]
+        obj = TestClass(items=original_list, raw_representation="raw")
+        cloned = copy.deepcopy(obj)
+
+        # list should be a new object
+        assert cloned.items is not original_list
+        assert cloned.items == ["a", "b"]
+        # raw_representation should be the same object
+        assert cloned.raw_representation is obj.raw_representation
+
+    def test_deepcopy_deep_copies_default_exclude_fields(self):
+        """Test that DEFAULT_EXCLUDE fields are deep-copied unless also in _SHALLOW_COPY_FIELDS."""
+        import copy
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            DEFAULT_EXCLUDE = {"additional_properties"}
+
+            def __init__(self, items: list, additional_properties: dict | None = None):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    items: Description of items.
+                    additional_properties: Description of additional_properties.
+                """
+                self.items = items
+                self.additional_properties = additional_properties or {}
+
+        original_props = {"key": "value"}
+        obj = TestClass(items=["a"], additional_properties=original_props)
+        cloned = copy.deepcopy(obj)
+
+        # DEFAULT_EXCLUDE field should be deep-copied (independent copy)
+        assert cloned.additional_properties is not original_props
+        assert cloned.additional_properties == {"key": "value"}
+
+    def test_deepcopy_shallow_copy_fields_override_default_exclude(self):
+        """Test that _SHALLOW_COPY_FIELDS controls deepcopy independently of DEFAULT_EXCLUDE."""
+        import copy
+
+        class NonCopyable:
+            """Represents the NonCopyable type and related behavior.
+            """
+            def __deepcopy__(self, memo):
+                """Implements   deepcopy  .
+                
+                Args:
+                    self: Description of self.
+                    memo: Description of memo.
+                """
+                raise TypeError("cannot deepcopy")
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            DEFAULT_EXCLUDE = {"opaque", "additional_properties"}
+            _SHALLOW_COPY_FIELDS = {"opaque"}
+
+            def __init__(self, items: list, opaque: Any = None, additional_properties: dict | None = None):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    items: Description of items.
+                    opaque: Description of opaque.
+                    additional_properties: Description of additional_properties.
+                """
+                self.items = items
+                self.opaque = opaque
+                self.additional_properties = additional_properties or {}
+
+        opaque = NonCopyable()
+        original_props = {"key": "value"}
+        obj = TestClass(items=["a"], opaque=opaque, additional_properties=original_props)
+        cloned = copy.deepcopy(obj)
+
+        # Field in both DEFAULT_EXCLUDE and _SHALLOW_COPY_FIELDS: shallow-copied
+        assert cloned.opaque is opaque
+        # Field in DEFAULT_EXCLUDE only: deep-copied
+        assert cloned.additional_properties is not original_props
+        assert cloned.additional_properties == {"key": "value"}
+        # Normal field: deep-copied
+        assert cloned.items is not obj.items
+        assert cloned.items == ["a"]
+
+    def test_shallow_copy_preserves_pickle_omitted_fields(self):
+        """Shallow copies retain runtime fields that pickle omits."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            def __init__(self, raw_representation: Any):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    raw_representation: Description of raw_representation.
+                """
+                self.raw_representation = raw_representation
+
+        raw = object()
+        cloned = copy.copy(TestClass(raw))
+
+        assert cloned.raw_representation is raw
+
+    def test_pickle_restores_slot_fields(self):
+        """Pickle state should include fields declared in slots."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            __slots__ = ("value",)
+
+            def __init__(self, value: str):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    value: Description of value.
+                """
+                self.value = value
+
+        original = TestClass("value")
+        restored = TestClass.__new__(TestClass)
+        restored.__setstate__(original.__getstate__())
+
+        assert restored.value == "value"
+
+    def test_pickle_restores_legacy_tuple_state(self):
+        """Pickle restoration should accept the legacy dict-and-slots tuple."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            __slots__ = ("value",)
+
+            def __init__(self):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                """
+                self.value = "new"
+
+        restored = TestClass.__new__(TestClass)
+        restored.__setstate__(({"other": "dict"}, {"value": "legacy"}))
+
+        assert restored.value == "legacy"
+
+    def test_pickle_omission_is_separate_from_shallow_copy_policy(self):
+        """Fields shallow-copied by default remain persistent unless explicitly omitted."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            _PICKLE_OMIT_FIELDS = set()
+
+            def __init__(self, raw_representation: Any):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    raw_representation: Description of raw_representation.
+                """
+                self.raw_representation = raw_representation
+
+        raw = {"provider": "value"}
+        state = TestClass(raw).__getstate__()
+
+        assert state["raw_representation"] == raw
+
+    def test_dependency_dict_merge_does_not_mutate_input(self):
+        """Test that dict dependency merging does not mutate the caller's input dictionary."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            INJECTABLE = {"config"}
+
+            def __init__(self, name: str, config: dict | None = None):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    name: Description of name.
+                    config: Description of config.
+                """
+                self.name = name
+                self.config = config or {}
+
+        # Create input with nested dict
+        input_data = {"type": "test_class", "name": "test", "config": {"base": True}}
+        original_input = copy.deepcopy(input_data)
+
+        # Call from_dict with dict-shaped dependency
+        dependencies = {"test_class": {"config": {"injected": True}}}
+        obj = TestClass.from_dict(input_data, dependencies=dependencies)
+
+        # Verify the object received the merged values
+        assert obj.config["base"] is True
+        assert obj.config["injected"] is True
+
+        # Verify the input was NOT mutated
+        assert input_data == original_input
+        assert input_data["config"] == {"base": True}
+        assert "injected" not in input_data["config"]
+
+    def test_dependency_dict_merge_preserves_override_semantics(self):
+        """Test that dict dependency merging preserves existing override behavior."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            INJECTABLE = {"options"}
+
+            def __init__(self, name: str, options: dict | None = None):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    name: Description of name.
+                    options: Description of options.
+                """
+                self.name = name
+                self.options = options or {}
+
+        # Existing options in data
+        data = {"type": "test_class", "name": "test", "options": {"timeout": 10, "name": "original"}}
+        # Dependency with conflicting and new keys
+        dependencies = {"test_class": {"options": {"timeout": 20, "new_key": "value"}}}
+
+        obj = TestClass.from_dict(data, dependencies=dependencies)
+
+        # Dependency values should override existing values
+        assert obj.options["timeout"] == 20  # Overridden by dependency
+        assert obj.options["name"] == "original"  # Preserved from original
+        assert obj.options["new_key"] == "value"  # Added from dependency
+
+    def test_repeated_from_dict_calls_do_not_leak_state(self):
+        """Test that reusing the same input dictionary across calls does not leak state."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            INJECTABLE = {"config"}
+
+            def __init__(self, name: str, config: dict | None = None):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    name: Description of name.
+                    config: Description of config.
+                """
+                self.name = name
+                self.config = config or {}
+
+        # Shared input specification
+        spec = {"type": "test_class", "name": "test", "config": {"base": True}}
+        original_spec = copy.deepcopy(spec)
+
+        # First call with first dependency
+        first = TestClass.from_dict(spec, dependencies={"test_class": {"config": {"first": True}}})
+
+        # Verify first result
+        assert first.config["base"] is True
+        assert first.config["first"] is True
+        assert "second" not in first.config
+
+        # Second call with second dependency (reusing same spec)
+        second = TestClass.from_dict(spec, dependencies={"test_class": {"config": {"second": True}}})
+
+        # Verify second result does NOT leak state from first call
+        assert second.config["base"] is True
+        assert second.config["second"] is True
+        assert "first" not in second.config
+
+        # Verify the original spec was never mutated
+        assert spec == original_spec
+        assert spec["config"] == {"base": True}
+
+    def test_instance_specific_dict_merge_does_not_mutate_input(self):
+        """Test that instance-specific dict dependency merging does not mutate input."""
+
+        class TestClass(SerializationMixin):
+            """Represents the TestClass type and related behavior.
+            """
+            INJECTABLE = {"config"}
+
+            def __init__(self, name: str, config: dict | None = None):
+                """Initializes a new instance.
+                
+                Args:
+                    self: Description of self.
+                    name: Description of name.
+                    config: Description of config.
+                """
+                self.name = name
+                self.config = config or {}
+
+        # Create input with nested dict
+        input_data = {"type": "test_class", "name": "special_instance", "config": {"base": True}}
+        original_input = copy.deepcopy(input_data)
+
+        # Call from_dict with instance-specific dict-shaped dependency
+        dependencies = {"test_class": {"name:special_instance": {"config": {"injected": True}}}}
+        obj = TestClass.from_dict(input_data, dependencies=dependencies)
+
+        # Verify the object received the merged values
+        assert obj.config["base"] is True
+        assert obj.config["injected"] is True
+
+        # Verify the input was NOT mutated
+        assert input_data == original_input
+        assert input_data["config"] == {"base": True}
+        assert "injected" not in input_data["config"]

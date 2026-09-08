@@ -1,0 +1,25 @@
+"""This module defines functionality for packages/a2a/agent_framework_a2a/__init__.
+
+This file is part of the Microsoft Agent Framework Python codebase.
+"""
+
+# Copyright (c) Microsoft. All rights reserved.
+
+import importlib.metadata
+
+from ._a2a_executor import A2AExecutor
+from ._agent import A2AAgent, A2AAgentSession, A2AContinuationToken, A2AServiceSessionId
+
+try:
+    __version__ = importlib.metadata.version(__name__)
+except importlib.metadata.PackageNotFoundError:
+    __version__ = "0.0.0"  # Fallback for development mode
+
+__all__ = [
+    "A2AAgent",
+    "A2AAgentSession",
+    "A2AContinuationToken",
+    "A2AExecutor",
+    "A2AServiceSessionId",
+    "__version__",
+]
