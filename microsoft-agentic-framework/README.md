@@ -119,7 +119,7 @@ cp .env.example .env          # Windows: copy .env.example .env
 python run_example.py --list  # list all 25 examples
 python run_example.py 1       # run example 01
 python run_example.py 25      # run the capstone
-python run_example.py all     # run all 25 one after another
+python run_example.py all     # run all 25 unattended (approvals in 10 default to "no")
 ```
 
 You can also run any file directly, from any folder:
@@ -253,7 +253,7 @@ All settings are read from `.env` (or real environment variables, which take pre
 | `AZURE_OPENAI_ENDPOINT` | ✅ | – | e.g. `https://my-resource.openai.azure.com/` |
 | `AZURE_OPENAI_DEPLOYMENT` | ❌ | `gpt-4o-mini` | Name of **your** model deployment |
 | `AZURE_OPENAI_API_VERSION` | ❌ | `2024-10-21` | Azure OpenAI REST API version |
-| `AUTO_APPROVE` | ❌ | *(unset)* | Example 10: set to `yes` / `no` to answer approval prompts automatically (useful with `run_example.py all`) |
+| `AUTO_APPROVE` | ❌ | *(unset)* | Example 10: set to `yes` / `no` to answer approval prompts automatically (`run_example.py all` defaults it to `no`) |
 | `INTERACTIVE` | ❌ | *(unset)* | Example 22: set to `1` to type your own replies to the support agents instead of the scripted ones |
 
 **Want to use a different provider?** Only `get_chat_client()` in `common/config.py` needs to change. Every

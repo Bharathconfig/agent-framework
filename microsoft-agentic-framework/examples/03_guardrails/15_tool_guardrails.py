@@ -59,7 +59,10 @@ def run_sql(query: str) -> str:
     return "rows: [('2026-01', 1520), ('2026-02', 1710)]"
 
 
-@tool(max_invocations=3)  # built-in limit across the lifetime of this tool instance
+# Built-in limit across the LIFETIME of this tool instance (not per run):
+# policy.reset() below does NOT reset it. That is fine here because only the
+# last scenario calls send_notification and each script run is a new process.
+@tool(max_invocations=3)
 def send_notification(message: str) -> str:
     """Send a notification to the on-call channel."""
     return f"Notification sent: {message}"

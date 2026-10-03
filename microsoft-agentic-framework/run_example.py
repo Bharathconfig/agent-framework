@@ -18,6 +18,7 @@ You can of course still run any example directly, e.g.:
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -46,10 +47,10 @@ def list_examples(examples: dict[int, Path]) -> None:
     print()
 
 
-def run(path: Path) -> int:
+def run(path: Path, env: dict[str, str] | None = None) -> int:
     """Run one example in a fresh Python process and return its exit code."""
     print(f"\n>>> python {path.relative_to(EXAMPLES_DIR.parent)}\n", flush=True)
-    return subprocess.call([sys.executable, str(path)], cwd=EXAMPLES_DIR.parent)
+    return subprocess.call([sys.executable, str(path)], cwd=EXAMPLES_DIR.parent, env=env)
 
 
 def main() -> int:
@@ -61,9 +62,15 @@ def main() -> int:
 
     arg = sys.argv[1].lower()
     if arg == "all":
+        # Unattended mode: never block on input(). Example 10 auto-answers its
+        # approval prompts ("no" = deny, unless you set AUTO_APPROVE yourself)
+        # and example 22 uses its scripted customer replies.
+        env = dict(os.environ)
+        env.setdefault("AUTO_APPROVE", "no")
+        env.pop("INTERACTIVE", None)
         # Stop at the first failing example so problems are easy to spot.
         for path in examples.values():
-            code = run(path)
+            code = run(path, env)
             if code != 0:
                 return code
         return 0

@@ -180,7 +180,13 @@ class InputGate(Executor):
         if pii:
             audit(ctx, f"input_gate: redacted input PII {pii}")
 
-        verdict = (await self.classifier.run(redacted, options={"response_format": SafetyVerdict})).value
+        # Fail closed: if the classifier errors out, treat the request as unsafe.
+        verdict: SafetyVerdict | None
+        try:
+            verdict = (await self.classifier.run(redacted, options={"response_format": SafetyVerdict})).value
+        except Exception as error:  # noqa: BLE001 - any failure must block, never allow
+            audit(ctx, f"input_gate: classifier error {type(error).__name__}")
+            verdict = None
         if verdict is None or not verdict.allowed or verdict.category != "safe":
             reason = verdict.reason if verdict else "classifier unavailable (fail-closed)"
             audit(ctx, f"input_gate: BLOCKED (LLM classifier: {reason})")

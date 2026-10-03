@@ -52,9 +52,36 @@ PII_PATTERNS: dict[str, re.Pattern[str]] = {
 }
 
 
+def luhn_valid(candidate: str) -> bool:
+    """Return True if the digits in ``candidate`` pass the Luhn checksum.
+
+    Real payment card numbers always pass this check, while most random digit
+    runs (order IDs, phone numbers with country codes, ...) do not. Using it
+    avoids labelling every long number as a credit card.
+    """
+    digits = [int(ch) for ch in candidate if ch.isdigit()]
+    total = 0
+    # Walk from the right; double every second digit, subtract 9 if > 9.
+    for index, digit in enumerate(reversed(digits)):
+        if index % 2 == 1:
+            digit = digit * 2 - 9 if digit > 4 else digit * 2
+        total += digit
+    return len(digits) >= 13 and total % 10 == 0
+
+
+# Optional extra checks applied to regex matches before they count as PII.
+PII_VALIDATORS: dict[str, Callable[[str], bool]] = {"CREDIT_CARD": luhn_valid}
+
+
+def _matches(label: str, pattern: re.Pattern[str], text: str) -> list[re.Match[str]]:
+    """All matches of ``pattern`` in ``text`` that also pass the label's validator."""
+    validator = PII_VALIDATORS.get(label)
+    return [m for m in pattern.finditer(text) if validator is None or validator(m.group(0))]
+
+
 def find_pii(text: str) -> list[str]:
     """Return the sorted list of PII *types* found in ``text`` (e.g. ['EMAIL'])."""
-    return sorted(label for label, pattern in PII_PATTERNS.items() if pattern.search(text))
+    return sorted(label for label, pattern in PII_PATTERNS.items() if _matches(label, pattern, text))
 
 
 def redact_pii(text: str) -> tuple[str, list[str]]:
@@ -65,8 +92,11 @@ def redact_pii(text: str) -> tuple[str, list[str]]:
     """
     found: list[str] = []
     for label, pattern in PII_PATTERNS.items():
-        text, count = pattern.subn(f"[REDACTED_{label}]", text)
-        if count:
+        # Replace from the end so earlier match positions stay valid.
+        matches = _matches(label, pattern, text)
+        for match in reversed(matches):
+            text = text[: match.start()] + f"[REDACTED_{label}]" + text[match.end() :]
+        if matches:
             found.append(label)
     return text, sorted(found)
 
