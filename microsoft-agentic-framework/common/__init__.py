@@ -15,6 +15,14 @@ Typical usage inside an example::
 """
 
 from common.config import get_chat_client, load_settings
-from common.utils import print_agent, print_header, print_section
+from common.utils import print_agent, print_header, print_section, print_workflow_events, print_workflow_output
 
-__all__ = ["get_chat_client", "load_settings", "print_agent", "print_header", "print_section"]
+__all__ = [
+    "get_chat_client",
+    "load_settings",
+    "print_agent",
+    "print_header",
+    "print_section",
+    "print_workflow_events",
+    "print_workflow_output",
+]
