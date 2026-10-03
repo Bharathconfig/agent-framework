@@ -1,0 +1,6 @@
+# Microsoft Agent Framework (meta-package: core + OpenAI/Azure OpenAI clients
+# + multi-agent orchestrations such as Sequential, Concurrent, GroupChat, Handoff).
+agent-framework==1.20.0
+
+# Loads AZURE_OPENAI_* settings from the .env file.
+python-dotenv>=1.0.1
