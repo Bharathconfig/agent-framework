@@ -31,7 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import asyncio  # noqa: E402
-from typing import Never  # noqa: E402
+from typing_extensions import Never  # noqa: E402  (typing.Never on Python 3.11+)
 
 from agent_framework import (  # noqa: E402
     Agent,

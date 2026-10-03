@@ -50,7 +50,9 @@ class ExtractedFacts(BaseModel):
 
     facts: list[str] = Field(
         default_factory=list,
-        description="Durable personal facts the user stated about themselves (name, job, preferences...). Empty if none.",
+        description=(
+            "Durable personal facts the user stated about themselves (name, job, preferences...). Empty if none."
+        ),
     )
 
 

@@ -55,8 +55,7 @@ async def main() -> None:
         client=client,
         name="Editor",
         instructions=(
-            "Edit the writer's post: fix grammar, tighten wording, add 3 relevant hashtags. "
-            "Return ONLY the final post."
+            "Edit the writer's post: fix grammar, tighten wording, add 3 relevant hashtags. Return ONLY the final post."
         ),
     )
 

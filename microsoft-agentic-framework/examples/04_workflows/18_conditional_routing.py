@@ -30,7 +30,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import asyncio  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
-from typing import Literal, Never  # noqa: E402
+from typing import Literal  # noqa: E402
+
+from typing_extensions import Never  # noqa: E402  (typing.Never on Python 3.11+)
 
 from agent_framework import Agent, Case, Default, Executor, WorkflowBuilder, WorkflowContext, handler  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
@@ -110,12 +112,18 @@ async def main() -> None:
     client = get_chat_client()
 
     classifier = Classifier(
-        Agent(client=client, name="Triage", instructions="Classify customer emails.", default_options={"temperature": 0})
+        Agent(
+            client=client, name="Triage", instructions="Classify customer emails.", default_options={"temperature": 0}
+        )
     )
     spam = SpamFilter()
     urgent = Responder(
         "urgent_responder",
-        Agent(client=client, name="Escalation", instructions="Write a calm, 3-sentence reply promising a call within 1 hour."),
+        Agent(
+            client=client,
+            name="Escalation",
+            instructions="Write a calm, 3-sentence reply promising a call within 1 hour.",
+        ),
         prefix="[URGENT - escalated to on-call]",
     )
     standard = Responder(

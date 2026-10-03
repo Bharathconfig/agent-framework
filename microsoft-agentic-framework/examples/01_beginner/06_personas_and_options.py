@@ -60,7 +60,7 @@ async def main() -> None:
 
     # asyncio.gather runs all three requests concurrently -> ~3x faster than sequential.
     responses = await asyncio.gather(*(agent.run(question) for agent in agents))
-    for agent, response in zip(agents, responses):
+    for agent, response in zip(agents, responses, strict=True):
         print_agent(agent.name or "Agent", response.text)
 
     # ------------------------------------------------------------------

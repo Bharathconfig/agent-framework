@@ -101,7 +101,9 @@ async def main() -> None:
         # Required for handoff participants: keeps the local chat history in sync
         # when a handoff tool call short-circuits the agent's run.
         require_per_service_call_history_persistence=True,
-        instructions="You handle billing. Use tools to look up invoices and issue refunds. Hand off tech issues to tech.",
+        instructions=(
+            "You handle billing. Use tools to look up invoices and issue refunds. Hand off tech issues to tech."
+        ),
         tools=[lookup_invoice, issue_refund],
     )
     tech = Agent(
