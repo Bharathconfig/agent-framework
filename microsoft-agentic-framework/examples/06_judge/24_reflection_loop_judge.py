@@ -74,10 +74,12 @@ class WriterExecutor(Executor):
     def __init__(self, agent: Agent) -> None:
         super().__init__(id="writer")
         self.agent = agent
-        self.session = agent.create_session()  # remembers previous drafts
+        self.session = agent.create_session()  # remembers previous drafts (reset per task)
 
     @handler
     async def write_first_draft(self, task: str, ctx: WorkflowContext[Draft]) -> None:
+        # A new task starts a fresh session so drafts from earlier runs never leak in.
+        self.session = self.agent.create_session()
         response = await self.agent.run(task, session=self.session)
         print_agent("Writer (round 1)", response.text)
         await ctx.send_message(Draft(text=response.text, round=1))

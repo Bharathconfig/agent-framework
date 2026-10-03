@@ -37,7 +37,7 @@ SESSION_FILE = SESSION_DIR / "trip_planner.json"
 
 def save_session(session: AgentSession) -> None:
     """Serialise the session to a JSON file."""
-    SESSION_DIR.mkdir(exist_ok=True)
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
     SESSION_FILE.write_text(json.dumps(session.to_dict(), indent=2), encoding="utf-8")
     print(f"\n[saved session -> {SESSION_FILE.relative_to(PROJECT_ROOT)}]")
 

@@ -85,7 +85,11 @@ def search_knowledge_base(query: str) -> str:
 
 
 class ToolBudgetMiddleware(FunctionMiddleware):
-    """Tool guardrail: at most ``limit`` tool calls per research task."""
+    """Tool guardrail: at most ``limit`` tool calls per middleware instance.
+
+    build_workflow() creates a fresh instance (and Researcher) for every request,
+    so in this example the budget is effectively "per research task".
+    """
 
     def __init__(self, limit: int = 4) -> None:
         self.limit = limit

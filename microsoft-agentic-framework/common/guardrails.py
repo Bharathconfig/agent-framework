@@ -45,7 +45,7 @@ from agent_framework import AgentContext, AgentMiddleware, AgentResponse, Messag
 # for teaching purposes; tune them for your country/data formats.
 PII_PATTERNS: dict[str, re.Pattern[str]] = {
     "EMAIL": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
-    "CREDIT_CARD": re.compile(r"\b(?:\d[ -]?){13,16}\b"),
+    "CREDIT_CARD": re.compile(r"\b(?:\d[ -]?){13,19}\b"),
     "US_SSN": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
     "PHONE": re.compile(r"(?<!\w)\+?\d{1,3}?[ -]?\(?\d{3}\)?[ -]?\d{3}[ -]?\d{4}\b"),
     "API_KEY": re.compile(r"\b(?:sk|pk|api|key)[-_][A-Za-z0-9]{16,}\b", re.IGNORECASE),
