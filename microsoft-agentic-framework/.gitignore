@@ -1,0 +1,20 @@
+# Secrets - never commit your real keys
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Files written by examples at runtime
+.sessions/
+*.log
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
